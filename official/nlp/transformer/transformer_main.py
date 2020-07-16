@@ -46,6 +46,11 @@ INF = int(1e9)
 BLEU_DIR = "bleu"
 _SINGLE_SAMPLE = 1
 
+tf.config.threading.set_inter_op_parallelism_threads(1)
+#tf.config.threading.set_intra_op_parallelism_threads(56)
+print(" Inter ", tf.config.threading.get_inter_op_parallelism_threads())
+print(" intra ", tf.config.threading.get_intra_op_parallelism_threads())
+
 
 def translate_and_compute_bleu(model,
                                params,
@@ -338,6 +343,10 @@ class TransformerTask(object):
         if self.use_tpu:
           raise NotImplementedError(
               "Keras model.fit on TPUs is not implemented.")
+        # profiling starts
+        #tf.profiler.experimental.start('/localdisk/ashraf/transformer_logdir/multi_mkl_run')
+        #tf.profiler.experimental.start('/localdisk/ashraf/transformer_logdir/single_mkl_run')
+        print("starting the while loop")
         history = model.fit(
             train_ds,
             initial_epoch=current_iteration,
@@ -347,6 +356,9 @@ class TransformerTask(object):
             # If TimeHistory is enabled, progress bar would be messy. Increase
             # the verbose level to get rid of it.
             verbose=(2 if flags_obj.enable_time_history else 1))
+        #profiling stops
+        print("ending the while loop")
+        #tf.profiler.experimental.stop()
         current_step += train_steps_per_eval
         logging.info("Train history: {}".format(history.history))
 

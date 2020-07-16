@@ -31,18 +31,19 @@ the two models by concatenating their last hidden layer.
 """
 from __future__ import absolute_import
 from __future__ import division
+# from __future__ import google_type_annotations
 from __future__ import print_function
 
 import sys
 
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
+from typing import Any, Dict, Text
 
-from official.datasets import movielens  # pylint: disable=g-bad-import-order
 from official.recommendation import constants as rconst
+from official.recommendation import movielens
 from official.recommendation import ncf_common
 from official.recommendation import stat_utils
-from official.utils.logs import mlperf_helper
 
 
 def sparse_to_dense_grads(grads_and_vars):
@@ -93,22 +94,11 @@ def neumf_model_fn(features, labels, mode, params):
         duplicate_mask,
         params["num_neg"],
         params["match_mlperf"],
-        use_tpu_spec=params["use_xla_for_gpu"])
+        use_tpu_spec=params["use_tpu"])
 
   elif mode == tf.estimator.ModeKeys.TRAIN:
     labels = tf.cast(labels, tf.int32)
     valid_pt_mask = features[rconst.VALID_POINT_MASK]
-
-    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.OPT_NAME, value="adam")
-    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.OPT_LR,
-                            value=params["learning_rate"])
-    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.OPT_HP_ADAM_BETA1,
-                            value=params["beta1"])
-    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.OPT_HP_ADAM_BETA2,
-                            value=params["beta2"])
-    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.OPT_HP_ADAM_EPSILON,
-                            value=params["epsilon"])
-
 
     optimizer = tf.compat.v1.train.AdamOptimizer(
         learning_rate=params["learning_rate"],
@@ -116,11 +106,7 @@ def neumf_model_fn(features, labels, mode, params):
         beta2=params["beta2"],
         epsilon=params["epsilon"])
     if params["use_tpu"]:
-      # TODO(seemuch): remove this contrib import
-      optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
-
-    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.MODEL_HP_LOSS_FN,
-                            value=mlperf_helper.TAGS.BCE)
+      optimizer = tf.compat.v1.tpu.CrossShardOptimizer(optimizer)
 
     loss = tf.compat.v1.losses.sparse_softmax_cross_entropy(
         labels=labels,
@@ -128,7 +114,6 @@ def neumf_model_fn(features, labels, mode, params):
         weights=tf.cast(valid_pt_mask, tf.float32)
     )
 
-    # This tensor is used by logging hooks.
     tf.identity(loss, name="cross_entropy")
 
     global_step = tf.compat.v1.train.get_global_step()
@@ -151,14 +136,15 @@ def _strip_first_and_last_dimension(x, batch_size):
   return tf.reshape(x[0, :], (batch_size,))
 
 
-def construct_model(user_input, item_input, params, need_strip=False):
-  # type: (tf.Tensor, tf.Tensor, dict) -> tf.keras.Model
+def construct_model(user_input: tf.Tensor, item_input: tf.Tensor,
+                    params: Dict[Text, Any]) -> tf.keras.Model:
   """Initialize NeuMF model.
 
   Args:
     user_input: keras input layer for users
     item_input: keras input layer for items
     params: Dict of hyperparameters.
+
   Raises:
     ValueError: if the first model layer is not even.
   Returns:
@@ -174,44 +160,39 @@ def construct_model(user_input, item_input, params, need_strip=False):
 
   mf_dim = params["mf_dim"]
 
-  mlperf_helper.ncf_print(key=mlperf_helper.TAGS.MODEL_HP_MF_DIM, value=mf_dim)
-  mlperf_helper.ncf_print(key=mlperf_helper.TAGS.MODEL_HP_MLP_LAYER_SIZES,
-                          value=model_layers)
-
   if model_layers[0] % 2 != 0:
     raise ValueError("The first layer size should be multiple of 2!")
 
   # Initializer for embedding layers
   embedding_initializer = "glorot_uniform"
 
-  if need_strip:
-    batch_size = params["batch_size"]
+  def mf_slice_fn(x):
+    x = tf.squeeze(x, [1])
+    return x[:, :mf_dim]
 
-    user_input_reshaped = tf.keras.layers.Lambda(
-        lambda x: _strip_first_and_last_dimension(
-            x, batch_size))(user_input)
-
-    item_input_reshaped = tf.keras.layers.Lambda(
-        lambda x: _strip_first_and_last_dimension(
-            x, batch_size))(item_input)
+  def mlp_slice_fn(x):
+    x = tf.squeeze(x, [1])
+    return x[:, mf_dim:]
 
   # It turns out to be significantly more effecient to store the MF and MLP
   # embedding portions in the same table, and then slice as needed.
-  mf_slice_fn = lambda x: x[:, :mf_dim]
-  mlp_slice_fn = lambda x: x[:, mf_dim:]
   embedding_user = tf.keras.layers.Embedding(
-      num_users, mf_dim + model_layers[0] // 2,
+      num_users,
+      mf_dim + model_layers[0] // 2,
       embeddings_initializer=embedding_initializer,
       embeddings_regularizer=tf.keras.regularizers.l2(mf_regularization),
-      input_length=1, name="embedding_user")(
-          user_input_reshaped if need_strip else user_input)
+      input_length=1,
+      name="embedding_user")(
+          user_input)
 
   embedding_item = tf.keras.layers.Embedding(
-      num_items, mf_dim + model_layers[0] // 2,
+      num_items,
+      mf_dim + model_layers[0] // 2,
       embeddings_initializer=embedding_initializer,
       embeddings_regularizer=tf.keras.regularizers.l2(mf_regularization),
-      input_length=1, name="embedding_item")(
-          item_input_reshaped if need_strip else item_input)
+      input_length=1,
+      name="embedding_item")(
+          item_input)
 
   # GMF part
   mf_user_latent = tf.keras.layers.Lambda(
@@ -255,13 +236,12 @@ def construct_model(user_input, item_input, params, need_strip=False):
   return model
 
 
-def _get_estimator_spec_with_metrics(logits,              # type: tf.Tensor
-                                     softmax_logits,      # type: tf.Tensor
-                                     duplicate_mask,      # type: tf.Tensor
-                                     num_training_neg,    # type: int
-                                     match_mlperf=False,  # type: bool
-                                     use_tpu_spec=False   # type: bool
-                                    ):
+def _get_estimator_spec_with_metrics(logits: tf.Tensor,
+                                     softmax_logits: tf.Tensor,
+                                     duplicate_mask: tf.Tensor,
+                                     num_training_neg: int,
+                                     match_mlperf: bool = False,
+                                     use_tpu_spec: bool = False):
   """Returns a EstimatorSpec that includes the metrics."""
   cross_entropy, \
   metric_fn, \
@@ -272,11 +252,10 @@ def _get_estimator_spec_with_metrics(logits,              # type: tf.Tensor
       softmax_logits,
       duplicate_mask,
       num_training_neg,
-      match_mlperf,
-      use_tpu_spec)
+      match_mlperf)
 
   if use_tpu_spec:
-    return tf.contrib.tpu.TPUEstimatorSpec(
+    return tf.estimator.tpu.TPUEstimatorSpec(
         mode=tf.estimator.ModeKeys.EVAL,
         loss=cross_entropy,
         eval_metrics=(metric_fn, [in_top_k, ndcg, metric_weights]))
@@ -288,13 +267,11 @@ def _get_estimator_spec_with_metrics(logits,              # type: tf.Tensor
   )
 
 
-def compute_eval_loss_and_metrics_helper(logits,              # type: tf.Tensor
-                                         softmax_logits,      # type: tf.Tensor
-                                         duplicate_mask,      # type: tf.Tensor
-                                         num_training_neg,    # type: int
-                                         match_mlperf=False,  # type: bool
-                                         use_tpu_spec=False   # type: bool
-                                        ):
+def compute_eval_loss_and_metrics_helper(logits: tf.Tensor,
+                                         softmax_logits: tf.Tensor,
+                                         duplicate_mask: tf.Tensor,
+                                         num_training_neg: int,
+                                         match_mlperf: bool = False):
   """Model evaluation with HR and NDCG metrics.
 
   The evaluation protocol is to rank the test interacted item (truth items)
@@ -336,24 +313,15 @@ def compute_eval_loss_and_metrics_helper(logits,              # type: tf.Tensor
   has a higher score, and item 20 occurs twice.
 
   Args:
-    logits: A tensor containing the predicted logits for each user. The shape
-      of logits is (num_users_per_batch * (1 + NUM_EVAL_NEGATIVES),) Logits
-      for a user are grouped, and the last element of the group is the true
-      element.
-
+    logits: A tensor containing the predicted logits for each user. The shape of
+      logits is (num_users_per_batch * (1 + NUM_EVAL_NEGATIVES),) Logits for a
+      user are grouped, and the last element of the group is the true element.
     softmax_logits: The same tensor, but with zeros left-appended.
-
-    duplicate_mask: A vector with the same shape as logits, with a value of 1
-      if the item corresponding to the logit at that position has already
-      appeared for that user.
-
+    duplicate_mask: A vector with the same shape as logits, with a value of 1 if
+      the item corresponding to the logit at that position has already appeared
+      for that user.
     num_training_neg: The number of negatives per positive during training.
-
     match_mlperf: Use the MLPerf reference convention for computing rank.
-
-    use_tpu_spec: Should a TPUEstimatorSpec be returned instead of an
-      EstimatorSpec. Required for TPUs and if XLA is done on a GPU. Despite its
-      name, TPUEstimatorSpecs work with GPUs
 
   Returns:
     cross_entropy: the loss
@@ -405,20 +373,18 @@ def compute_eval_loss_and_metrics_helper(logits,              # type: tf.Tensor
   return cross_entropy, metric_fn, in_top_k, ndcg, metric_weights
 
 
-def compute_top_k_and_ndcg(logits,              # type: tf.Tensor
-                           duplicate_mask,      # type: tf.Tensor
-                           match_mlperf=False   # type: bool
-                          ):
+def compute_top_k_and_ndcg(logits: tf.Tensor,
+                           duplicate_mask: tf.Tensor,
+                           match_mlperf: bool = False):
   """Compute inputs of metric calculation.
 
   Args:
-    logits: A tensor containing the predicted logits for each user. The shape
-      of logits is (num_users_per_batch * (1 + NUM_EVAL_NEGATIVES),) Logits
-      for a user are grouped, and the first element of the group is the true
-      element.
-    duplicate_mask: A vector with the same shape as logits, with a value of 1
-      if the item corresponding to the logit at that position has already
-      appeared for that user.
+    logits: A tensor containing the predicted logits for each user. The shape of
+      logits is (num_users_per_batch * (1 + NUM_EVAL_NEGATIVES),) Logits for a
+      user are grouped, and the first element of the group is the true element.
+    duplicate_mask: A vector with the same shape as logits, with a value of 1 if
+      the item corresponding to the logit at that position has already appeared
+      for that user.
     match_mlperf: Use the MLPerf reference convention for computing rank.
 
   Returns:
@@ -429,7 +395,7 @@ def compute_top_k_and_ndcg(logits,              # type: tf.Tensor
   logits_by_user = tf.reshape(logits, (-1, rconst.NUM_EVAL_NEGATIVES + 1))
   duplicate_mask_by_user = tf.cast(
       tf.reshape(duplicate_mask, (-1, rconst.NUM_EVAL_NEGATIVES + 1)),
-      tf.float32)
+      logits_by_user.dtype)
 
   if match_mlperf:
     # Set duplicate logits to the min value for that dtype. The MLPerf
